@@ -35,6 +35,7 @@ from dotenv import load_dotenv
 
 # Global variable section
 camera_data = {"vision": []}  # This will be heavily rely for vision
+model_list = {}
 
 
 def generate_map_translation(capabilities):
@@ -84,44 +85,34 @@ def action(obtained_data):
     capabilities: dictionary.
     """
     # recieve_motor_data = actuators.get_motor_data(obtained_data)
-    recieve_servo_data = actuators.get_servo_data(obtained_data)
-    recieve_servo_position_data = actuators.get_servo_position_data(obtained_data)
+    receive_servo_data = actuators.get_servo_data(obtained_data)
+    receive_servo_position_data = actuators.get_servo_position_data(obtained_data)
+    selected_name = ""
 
-    if 'reset' in obtained_data:
-        for index in obtained_data['reset']:
-            starter.keyframe_selected_bones("ClassicMan_Rigify", index)
-
-    if 'misc' in obtained_data:
-        for x in obtained_data['misc']:
-            # if x == 0:
-            #     starter.print_all_keyframes()
-            # if x == 1:
-            #     starter.clear_armature_keyframe("ClassicMan_Rigify")
-            # starter.print_keyframe(x)
-            print("@@@@" * 10)
-            starter.get_keyed_bones(x)
-            print("zzzzzzzzzzzz" * 10)
-            starter.print_keyframe(x)
-            print("!!!" * 10)
-
-    if recieve_servo_position_data:
+    if receive_servo_position_data:
         # pass # output like {0:0.50, 1:0.20, 2:0.30} # example but the data comes from your capabilities' servo range
-        for feagi_index in recieve_servo_position_data:
+        for feagi_index in receive_servo_position_data:
             movement_data = [None, None, None]  # initialize the ryp. If the index is none, it should be skipped.
-            movement_data[verify_which_xyz(feagi_index / 3)] = recieve_servo_position_data[
+            movement_data[verify_which_xyz(feagi_index / 3)] = receive_servo_position_data[feagi_index]  # will update which index from FEAGI
+            bone_name = feagi_index_to_bone(feagi_index)
+            for model_name in model_list:
+                if model_list[model_name][0] <= feagi_index <= model_list[model_name][1]:
+                    selected_name = model_name
+            if bone_name is not None:
+                starter.change_ryp(selected_name, bone_name, movement_data)
+
+    if receive_servo_data:
+        for feagi_index in receive_servo_data:
+            movement_data = [None, None, None]
+            movement_data[verify_which_xyz(feagi_index / 3)] = receive_servo_data[
                 feagi_index]  # will update which index from FEAGI
             bone_name = feagi_index_to_bone(feagi_index)
+            for model_name in model_list:
+                if model_list[model_name][0] <= feagi_index <= model_list[model_name][1]:
+                    selected_name = model_name
             if bone_name is not None:
-                starter.change_ryp("ClassicMan_Rigify", bone_name, movement_data)
-    if recieve_servo_data:
-        # pass # output like {0:0.50, 1:0.20, 2:0.30} # example but the data comes from your capabilities' servo range
-        for feagi_index in recieve_servo_data:
-            movement_data = [None, None, None]  # initialize the ryp. If the index is none, it should be skipped.
-            movement_data[verify_which_xyz(feagi_index / 3)] = recieve_servo_data[
-                feagi_index]  # will update which index from FEAGI
-            bone_name = feagi_index_to_bone(feagi_index)
-            if bone_name is not None:
-                starter.change_ryp("ClassicMan_Rigify", bone_name, movement_data)
+                starter.change_ryp(selected_name, bone_name, movement_data)
+
     # if recieve_motor_data:  # example output: {0: 0.245, 2: 1.0}
     #     pass
 
@@ -165,8 +156,17 @@ if __name__ == "__main__":
         print("RUN_ENV:", run_env)
         print("Using FEAGI_OPU_PORT:", feagi_opu_port)
 
-    # blender custom code
-    import starter
+    import importlib
+
+    try:
+        import starter
+        from capabilities_gen import get_all_armature_names
+
+        importlib.reload(starter)  # reload from disk instead of using cached module
+        importlib.reload(get_all_armature_names)
+    except ImportError:
+        import starter
+        from capabilities_gen import get_all_armature_names
 
     config = feagi.build_up_from_configuration(current_dir)
     feagi_settings = config['feagi_settings'].copy()
@@ -175,6 +175,7 @@ if __name__ == "__main__":
     message_to_feagi = config['message_to_feagi'].copy()
     capabilities = config['capabilities'].copy()
     map_translation = generate_map_translation(capabilities)
+    print("map_translation:", map_translation)
 
     # Simply copying and pasting the code below will do the full work for you. It basically checks
     # and updates the network to ensure that it can connect with FEAGI. If it doesn't find FEAGI,
@@ -204,8 +205,10 @@ if __name__ == "__main__":
         feagi_index_int = int(x)
         map_translation[feagi_index_int] = capabilities['output']['servo'][feagi_index]['custom_name']
 
+    model_list = starter.get_name_and_update_index(get_all_armature_names())
 
-    def gather_gyro_data(armature):
+
+    def gather_gyro_data(armature, index):
         gyro_data = {}
         for idx, bone in enumerate(armature.pose.bones):
             # location_values = [bone.location[0], bone.location[1], bone.location[2]]  # Full (x, y, z) location this will goes to a different cortical area.
@@ -221,7 +224,7 @@ if __name__ == "__main__":
             # }
 
             # Assign this dictionary to the bone's index key (as a string)
-            gyro_data[str(idx)] = rotation_values
+            gyro_data[str(idx + index)] = rotation_values
         return gyro_data
 
 
@@ -234,13 +237,13 @@ if __name__ == "__main__":
             obtained_signals = pns.obtain_opu_data(message_from_feagi)
             action(obtained_signals)
 
-        armature = bpy.data.objects.get("ClassicMan_Rigify")
-        if armature is None:
-            return feagi_settings['feagi_burst_speed']
-
-        gyro_data = gather_gyro_data(armature)
-
-        # print("Data being sent to FEAGI (first 3 indexes):")
+        gyro_data = {}
+        for name in model_list:
+            armature = bpy.data.objects.get(name)
+            if not gyro_data:
+                gyro_data = gather_gyro_data(armature, model_list[name][0])
+            else:
+                gyro_data.update(gather_gyro_data(armature, model_list[name][0]))
 
         # the data should be "{'0': [x,y,z]} taken care of from gather_gyro_data"
         message_to_feagi_local = sensors.create_data_for_feagi('gyro', capabilities, message_to_feagi,
